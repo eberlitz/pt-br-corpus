@@ -1,3 +1,5 @@
+# Generating the corpus
+
 1. Download the Wikipedia pt-br articles dump:
 
 ```sh
