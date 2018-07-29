@@ -53,5 +53,5 @@ These steps will generate a pt-BR corpus with:
 
 - 1.6GB
 - 9896520 sentences
-- 251193592 words
-- 1498754 unique words
+- 251193592 tokens
+- 3137040 unique tokens
