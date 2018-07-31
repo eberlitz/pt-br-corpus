@@ -5,25 +5,29 @@ import os
 import sys
 import bz2
 import glob
+import sqlite3
 import argparse
 import subprocess
 import multiprocessing
 from gensim.utils import grouper
 from helpers import NextFile, OutputSplitter, mkdir_if_not_exists, JobsReporter
 
-job_batch_size = 10
+job_batch_size = 1
 
-class PtWikiSentences(object):
-    def __init__(self, dirname):
-        self.dirname = dirname
+
+class PtWikiSqliteSentences(object):
+    def __init__(self, filepath):
+        self.filepath = filepath
 
     def __iter__(self):
-        filepaths = glob.glob(self.dirname)
-        filepaths.sort()
-        for fp in filepaths:
-            with bz2.BZ2File(fp, 'r') as input:
-                for line in input:
-                    yield line.decode('utf-8')
+        toparse = []
+        with sqlite3.connect(self.filepath) as conn:
+            c = conn.cursor()
+            toparse = [row for row in c.execute(
+                'SELECT id FROM sentences where palavras IS NULL')]
+        for row in toparse:
+            yield row
+
 
 def run_parse(sentence):
     process = subprocess.Popen(['/opt/palavras/por.pl'],
@@ -34,55 +38,85 @@ def run_parse(sentence):
         input=sentence.encode('utf-8'))
     if stderrdata != b'PALAVRAS revision 12687, compiled on 2018-03-14\n':
         print(stderrdata)
+        return 'null'
     return stdoutdata
 
-def split_result(result):
-    current = ''
-    for line in result.split('\n'):
-        current += line + '\n'
-        if (line.startswith('<ß>')):
-            current = line + '\n'
-        elif line.startswith('</ß>'):
-            print (current)
-            yield current
 
-def worker_palavras(job):
-    sentences = ''
-    for sentence in job:
-        sentences += sentence
+# def split_result(result):
+#     current = ''
+#     previous = ''
+#     for line in result.split('\n'):
+#         current += line + '\n'
+#         if (line.startswith('<ß>')):
+#             current = line + '\n'
+#         elif line.startswith('</ß>') and not previous.startswith('$;'):
+#             yield current
+#         previous = line
 
-    result = run_parse(sentences).decode('utf-8')
-    return split_result(result)
+
+# def create_worker_method(sqlfile_path):
+#     def worker_palavras(job):
+#         toparse = [id for (id,) in job]
+#         data = []
+#         with sqlite3.connect(sqlfile_path) as conn:
+#             c = conn.cursor()
+#             query = "SELECT id, text FROM sentences where id IN ({0})".format(
+#                 ','.join(['?']*len(toparse)))
+#             data = [row for row in c.execute(query, toparse)]
+
+#         sentences = ''
+#         for (_, sentence) in data:
+#             sentences += sentence
+
+#         result = run_parse(sentences).decode('utf-8')
+#         parsed_list = [x for x in split_result(result)]
+
+#         return [(id, parsed_list[idx]) for idx, (id, text) in enumerate(data)]
+#     return worker_palavras
+
+def create_worker_method(sqlfile_path):
+    def worker_palavras(job):
+        parsed_list = []
+        with sqlite3.connect(sqlfile_path) as conn:
+            for (id,) in job:
+                c = conn.cursor()
+                c.execute("SELECT id, text FROM sentences where id = ?", (id,))
+                (_, text) = c.fetchone()
+                result = run_parse(text).decode('utf-8')
+                parsed_list.append((id, result))
+        return parsed_list
+    return worker_palavras
+
 
 def main():
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]),
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
                                      description=__doc__)
     parser.add_argument(
-        "input", help="ptwiki-compressed-preprocessed-text-folder")
-    parser.add_argument("-o", "--output", default="./data/palavras/",
-                        help="directory for extracted files")
+        "input", help="sqlfile_path")
     args = parser.parse_args()
-    input_dirname = args.input
-    output_dirname = args.output
-    mkdir_if_not_exists(output_dirname)
-
-    output = OutputSplitter(NextFile(output_dirname),  1024, False)
+    sqlfile_path = args.input
 
     num_threds = multiprocessing.cpu_count()
     pool = multiprocessing.pool.ThreadPool(num_threds)
     print('Running with {0} threads ...'.format(num_threds))
     reporter = JobsReporter(batch_size=job_batch_size)
-    sentences = PtWikiSentences(input_dirname+'/**/*.bz2')
+    sentences = PtWikiSqliteSentences(sqlfile_path)
 
     jobs = grouper(sentences, job_batch_size)
 
-    for result in pool.imap(worker_palavras, jobs):
-        for st in result:
-            output.write(st.encode('utf-8'))
-        reporter.complete_job(report=True)
-    output.close()
+    with sqlite3.connect(sqlfile_path) as conn:
+        c = conn.cursor()
+        for (total,) in c.execute('SELECT COUNT(*) FROM sentences where palavras IS NULL'):
+            print('Sentences to be parsed: {0}'.format(total))
+        for result in pool.imap(create_worker_method(sqlfile_path), jobs):
+            for (id, parsed_text) in result:
+                u = (parsed_text, id)
+                c.execute('UPDATE sentences SET palavras = ? WHERE id = ?', u)
+            conn.commit()
+            reporter.complete_job(report=True)
     print('\n')
+
 
 if __name__ == '__main__':
     main()
