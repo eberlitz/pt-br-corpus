@@ -12,21 +12,8 @@ import multiprocessing
 from gensim.utils import grouper
 from helpers import NextFile, OutputSplitter, mkdir_if_not_exists, JobsReporter
 
-job_batch_size = 1
-
-
-class PtWikiSqliteSentences(object):
-    def __init__(self, filepath):
-        self.filepath = filepath
-
-    def __iter__(self):
-        toparse = []
-        with sqlite3.connect(self.filepath) as conn:
-            c = conn.cursor()
-            toparse = [row for row in c.execute(
-                'SELECT id FROM sentences where palavras IS NULL')]
-        for row in toparse:
-            yield row
+sentence_separator_token = '\n\nNull.\n\n'
+sentence_separator_result = '<ß>\nNull \t[Null] <hum> <*> PROP M/F S @NPHR  #1->0\n$. #2->0\n</ß>'
 
 
 def run_parse(sentence):
@@ -42,40 +29,26 @@ def run_parse(sentence):
     return stdoutdata
 
 
-# def split_result(result):
-#     current = ''
-#     previous = ''
-#     for line in result.split('\n'):
-#         current += line + '\n'
-#         if (line.startswith('<ß>')):
-#             current = line + '\n'
-#         elif line.startswith('</ß>') and not previous.startswith('$;'):
-#             yield current
-#         previous = line
-
-
-# def create_worker_method(sqlfile_path):
-#     def worker_palavras(job):
-#         toparse = [id for (id,) in job]
-#         data = []
-#         with sqlite3.connect(sqlfile_path) as conn:
-#             c = conn.cursor()
-#             query = "SELECT id, text FROM sentences where id IN ({0})".format(
-#                 ','.join(['?']*len(toparse)))
-#             data = [row for row in c.execute(query, toparse)]
-
-#         sentences = ''
-#         for (_, sentence) in data:
-#             sentences += sentence
-
-#         result = run_parse(sentences).decode('utf-8')
-#         parsed_list = [x for x in split_result(result)]
-
-#         return [(id, parsed_list[idx]) for idx, (id, text) in enumerate(data)]
-#     return worker_palavras
-
-def create_worker_method(sqlfile_path):
+def create_worker_method(sqlfile_path, job_batch_size):
     def worker_palavras(job):
+        toparse = [id for (id,) in job]
+        data = []
+        with sqlite3.connect(sqlfile_path) as conn:
+            c = conn.cursor()
+            query = "SELECT id, text FROM sentences where id IN ({0})".format(
+                ','.join(['?']*len(toparse)))
+            data = [row for row in c.execute(query, toparse)]
+
+        sentences = sentence_separator_token.join(
+            [sentence for (_, sentence) in data])
+        result = run_parse(sentences).decode('utf-8')
+        parsed_list = result.split(sentence_separator_result)
+        if (len(data) != len(parsed_list)):
+            print('error')
+            return []
+        return [(id, parsed_list[idx]) for idx, (id, text) in enumerate(data)]
+
+    def worker_palavras_one(job):
         parsed_list = []
         with sqlite3.connect(sqlfile_path) as conn:
             for (id,) in job:
@@ -85,6 +58,9 @@ def create_worker_method(sqlfile_path):
                 result = run_parse(text).decode('utf-8')
                 parsed_list.append((id, result))
         return parsed_list
+
+    if job_batch_size == 1:
+        return worker_palavras_one
     return worker_palavras
 
 
@@ -94,22 +70,27 @@ def main():
                                      description=__doc__)
     parser.add_argument(
         "input", help="sqlfile_path")
+    parser.add_argument("-b", "--batchsize", type=int, default=50,
+                        help="The number of sentences to be sended to the parser in each iteration.")
     args = parser.parse_args()
     sqlfile_path = args.input
+    job_batch_size = args.batchsize
 
     num_threds = multiprocessing.cpu_count()
     pool = multiprocessing.pool.ThreadPool(num_threds)
     print('Running with {0} threads ...'.format(num_threds))
-    reporter = JobsReporter(batch_size=job_batch_size)
-    sentences = PtWikiSqliteSentences(sqlfile_path)
+    print('Batch size: {0}'.format(job_batch_size))
 
-    jobs = grouper(sentences, job_batch_size)
+    reporter = JobsReporter(batch_size=job_batch_size)
 
     with sqlite3.connect(sqlfile_path) as conn:
+        sentences = [row for row in conn.cursor().execute(
+            'SELECT id FROM sentences where palavras IS NULL')]
+        print('Sentences to be parsed: {0}'.format(len(sentences)))
+        jobs = grouper(sentences, job_batch_size)
         c = conn.cursor()
-        for (total,) in c.execute('SELECT COUNT(*) FROM sentences where palavras IS NULL'):
-            print('Sentences to be parsed: {0}'.format(total))
-        for result in pool.imap(create_worker_method(sqlfile_path), jobs):
+        reporter.reset()
+        for result in pool.imap(create_worker_method(sqlfile_path, job_batch_size), jobs):
             for (id, parsed_text) in result:
                 u = (parsed_text, id)
                 c.execute('UPDATE sentences SET palavras = ? WHERE id = ?', u)

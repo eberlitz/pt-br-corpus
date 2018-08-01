@@ -13,6 +13,7 @@ def mkdir_if_not_exists(dirname):
             logging.error('Could not create: %s', dirname)
             return
 
+
 class JobsReporter:
     def __init__(self, report_period=1, batch_size=1):
         self.finished = 0
@@ -20,7 +21,7 @@ class JobsReporter:
         self.batch_size = batch_size
         self.start_time = time.time()
 
-    def complete_job(self, num=1, report = False):
+    def complete_job(self, num=1, report=False):
         self.finished += num * self.batch_size
         if report == True:
             self.report()
@@ -34,6 +35,13 @@ class JobsReporter:
                          (jobs_per_second, self.finished))
             stdout.flush()
 
+    def reset(self):
+        self.start_time = time.time()
+        self.finished = 0
+
+    def reportElapsed(self):
+        elapsed_time = time.time() - self.start_time
+        stdout.write('\nElapsed time: {0}'.format(elapsed_time))
 
 # ------------------------------------------------------------------------------
 # Output
