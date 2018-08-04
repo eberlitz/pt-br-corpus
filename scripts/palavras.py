@@ -25,7 +25,7 @@ def run_parse(sentence):
         input=sentence.encode('utf-8'))
     if stderrdata != b'PALAVRAS revision 12687, compiled on 2018-03-14\n':
         print(stderrdata)
-        return 'null'
+        return b'null'
     return stdoutdata
 
 
