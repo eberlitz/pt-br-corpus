@@ -14,7 +14,6 @@ import subprocess
 import multiprocessing
 from itertools import dropwhile
 from collections import Counter
-from gensim.utils import grouper
 from helpers import NextFile, OutputSplitter, mkdir_if_not_exists, JobsReporter
 
 
